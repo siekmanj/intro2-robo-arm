@@ -45,8 +45,11 @@ class CubeTracker:
         self.target_color = color
         self.size = (640, 480)
         self.cube_pos = None
+        self.camera = Camera.Camera()
+        self.camera.camera_open()
 
-    def track(self, frame: np.ndarray):
+    def track(self):
+        frame = self.camera.frame
         img = frame.copy()
         img_h, img_w = img.shape[:2]
 
@@ -75,19 +78,30 @@ class CubeTracker:
             img_centerx, img_centery = getCenter(rect, roi, self.size, square_length)
             world_x, world_y = convertCoordinate(img_centerx, img_centery, self.size)
 
+            self.cube_position = world_x, world_y
+            self.cube_rotation = rect[2]
+            if draw:
+                self.draw_track(img)
+            return world_x, world_y, self.cube_rotation
+        return None
+
     def draw_track(self, img):
         # Draw a line through the center of the screen for calibration (should align
         # with the blue cross on the paper)
         cv2.line(img, (0, int(img_h / 2)), (img_w, int(img_h / 2)), (0, 0, 200), 1)
         cv2.line(img, (int(img_w / 2), 0), (int(img_w / 2), img_h), (0, 0, 200), 1)
 
+        world_x, world_y = self.cube_position
         cv2.drawContours(img, [box], -1, range_rgb[self.target_color], 2)
         cv2.putText(img, '(' + str(world_x) + ',' + str(world_y) + ')', (min(box[0, 0], box[2, 0]), box[2, 1] - 10),
         cv2.FONT_HERSHEY_SIMPLEX, 0.5, range_rgb[self.target_color], 1)
 
         cv2.putText(img, "Color: " + self.target_color, (10, img.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.65, range_rgb[self.target_color], 2)
-        self.cube_pos = world_x, world_y
-        return img
+
+        cv2.imshow('Frame', img)
+        key = cv2.waitKey(1)
+        if key == 27:
+            break
 
 from enum import Enum
 
@@ -126,10 +140,13 @@ class CubeGrabber:
         }
         self.closed_gripper_angle = 500
 
-    def control(self, cube_position, cube_rotation):
+    def grab(self, cube_pose):
         beep(self.state, 1)
         print('start state:', self.state)
-        if cube_position is None:
+        if cube_pose is not None:
+            cube_position, cube_rotation = cube_pose[:2], cube_pose[2]
+
+        if cube_pose is None:
             self.state = State.WHERE_IS_BLOCK_I_DO_NOT_KNOW
 
             # Initial position
@@ -201,17 +218,15 @@ class CubeGrabber:
 
 
 if __name__ == '__main__':
-    my_camera = Camera.Camera()
-    my_camera.camera_open()
     tracker = CubeTracker()
-    while True:
-        img = my_camera.frame
-        if img is not None:
-            frame = img.copy()
-            Frame = tracker.track(frame)
-            cv2.imshow('Frame', Frame)
-            key = cv2.waitKey(1)
-            if key == 27:
-                break
-    my_camera.camera_close()
+    grabber = CubeGrabber()
+
+    threads = []
+    timer = rossros.Timer((timer_bus,), duration=5, delay=0.1, termination_busses=(timer_bus,), name="master timer")
+    tracking_bus = rossros.Bus(name='trackbus')
+    threads += [rossros.Producer(tracker.track, tracking_bus, termination_busses=(timer_bus,), delay=dt, name='tracker')]
+    threads += [rossros.Consumer(grabber.grab, tracking_bus, termination_busses=(timer_bus,), delay=dt, name='grabber')]
+    rossros.runConcurrently(threads)
+
+    tracker.camera.camera_close()
     cv2.destroyAllWindows()
